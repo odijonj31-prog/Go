@@ -520,7 +520,210 @@ def _search_flat(prefix: str, q: str, n: int) -> list[dict]:
 
 _SC: dict[str, tuple[float, list]] = {}
 
-
 async def _one(prefix: str, q: str, n: int) -> list[dict]:
     async with SSEM:
-     
+        t0 = time.monotonic()
+        try:
+            res = await asyncio.to_thread(_search_flat, prefix, q, n)
+            log.info("TIMING %s %.1fs natija=%d q=%r", prefix, time.monotonic() - t0, len(res), q[:40])
+            return res
+        except Exception as e:
+            log.info("%s qidiruvi xato (%.1fs): %s", prefix, time.monotonic() - t0, str(e)[:160])
+            return []
+
+
+async def search(q: str, n: int = 20) -> list[dict]:
+    key = q.lower().strip()
+    hit = _SC.get(key)
+    if hit and time.monotonic() - hit[0] < 3600:
+        return hit[1]
+    # YouTube bloklangan bo'lsa, yuklab bo'ladigan SoundCloud birinchi qidiriladi
+    first, second = ("scsearch", "ytsearch") if yt_blocked() else ("ytsearch", "scsearch")
+    t1 = asyncio.create_task(_one(first, q, n))
+    done, _ = await asyncio.wait({t1}, timeout=config.SEARCH_HEDGE)
+    res = t1.result() if t1 in done else []
+    if not res:
+        # birinchisi sekin yoki bo'sh: zaxirani parallel ishga tushiramiz, qaysi biri natija bersa shuni olamiz
+        pending = {t1, asyncio.create_task(_one(second, q, n))} if t1 not in done else \
+                  {asyncio.create_task(_one(second, q, n))}
+        while pending and not res:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for d in done:
+                res = res or d.result()
+    if res:
+        if len(_SC) > 3000:
+            _SC.clear()
+        _SC[key] = (time.monotonic(), res)
+    return res
+
+
+# ---------------- oldindan yuklash (qidiruvdan keyin fonda) ----------------
+PRE: dict[str, Song] = {}                 # tayyor qo'shiqlar: target -> Song
+_PRE_TASKS: dict[str, asyncio.Task] = {}   # yuklanayotganlar
+PSEM = asyncio.Semaphore(2)
+
+
+def prefetched_ready(target: str) -> bool:
+    s = PRE.get(target)
+    return bool(s and s.path.exists())
+
+
+async def _prefetch_one(target: str, title: str) -> None:
+    try:
+        async with PSEM:
+            if JOBS.locked():   # asosiy yuklashlar band bo'lsa, fon ishi xalaqit bermaydi
+                return
+            song = await asyncio.to_thread(_song, target, title)
+        if song:
+            while len(PRE) >= 30:   # eng eskisini o'chiramiz
+                old = PRE.pop(next(iter(PRE)))
+                old.path.unlink(missing_ok=True)
+            PRE[target] = song
+    except Exception as e:
+        log.info("Oldindan yuklash xato (%s): %s", target, str(e)[:120])
+    finally:
+        _PRE_TASKS.pop(target, None)
+
+
+def prefetch(items: list[dict]) -> None:
+    """Qidiruv natijalarining birinchi bir nechtasini fonda yuklab qo'yadi."""
+    for it in items[:config.PREFETCH]:
+        tgt = it["target"]
+        if tgt in PRE or tgt in _PRE_TASKS:
+            continue
+        _PRE_TASKS[tgt] = asyncio.create_task(_prefetch_one(tgt, it["title"]))
+
+
+async def get_prefetched(target: str) -> Song | None:
+    """Tayyor bo'lsa darrov, yuklanayotgan bo'lsa tugashini kutib qaytaradi (bir marta)."""
+    task = _PRE_TASKS.get(target)
+    if task:
+        await asyncio.shield(task)
+    s = PRE.pop(target, None)
+    return s if s and s.path.exists() else None
+
+
+def _merge(lists: list[list[dict]], limit: int) -> list[dict]:
+    """Ro'yxatlarni navbat bilan aralashtiradi (takrorlarsiz)."""
+    out, seen, i = [], set(), 0
+    while len(out) < limit and any(i < len(x) for x in lists):
+        for x in lists:
+            if i < len(x) and x[i]["target"] not in seen:
+                seen.add(x[i]["target"])
+                out.append(x[i])
+        i += 1
+    return out
+
+
+async def search_multi(queries: list[str], lang: str, limit: int = 20) -> list[dict]:
+    """Bir nechta so'rov (masalan, ovozdan olingan bir nechta taxmin) natijalarini birlashtiradi.
+    O'zbek tilida 'uzbek' qo'shilgan so'rov natijalari birinchi chiqadi."""
+    queries = [q for q in queries if q][:3]
+    bias = config.UZ_BIAS and lang == "uz"
+    biased = [f"{q} uzbek" for q in queries] if bias else []
+    res = await asyncio.gather(*(search(v) for v in biased + queries), return_exceptions=True)
+    lists = [r if isinstance(r, list) else [] for r in res]
+    first, rest = lists[:len(biased)], lists[len(biased):]
+    out = _merge(first, limit) if first else []
+    seen = {x["target"] for x in out}
+    out += [x for x in _merge(rest, limit) if x["target"] not in seen]
+    return out[:limit]
+
+# ---------------- ovozni matnga o'girish ----------------
+STT_PROMPT = {
+    "uz": "Qo'shiq nomi yoki qo'shiqchi ismi.",
+    "ru": "Название песни или имя исполнителя.",
+    "en": "Song title or artist name.",
+}
+GOOGLE_LANG = {"uz": "uz-UZ", "ru": "ru-RU", "en": "en-US"}
+
+
+async def _groq(src: Path, lang: str) -> str:
+    import aiohttp
+    form = aiohttp.FormData()
+    form.add_field("file", src.read_bytes(), filename="voice.ogg", content_type="audio/ogg")
+    form.add_field("model", "whisper-large-v3")
+    form.add_field("language", lang)
+    if STT_PROMPT.get(lang):
+        form.add_field("prompt", STT_PROMPT[lang])
+    form.add_field("response_format", "json")
+    form.add_field("temperature", "0")
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
+        async with s.post("https://api.groq.com/openai/v1/audio/transcriptions",
+                          headers={"Authorization": f"Bearer {config.GROQ_API_KEY}"}, data=form) as r:
+            if r.status != 200:
+                log.warning("Groq xato %s: %s", r.status, (await r.text())[:200])
+                return ""
+            return ((await r.json()).get("text") or "").strip()
+
+
+def _google_stt(wav: Path, lang: str) -> str:
+    try:
+        import speech_recognition as sr
+    except Exception:
+        return ""
+    rec = sr.Recognizer()
+    with sr.AudioFile(str(wav)) as s:
+        audio = rec.record(s)
+    try:
+        return rec.recognize_google(audio, language=GOOGLE_LANG.get(lang, "en-US")).strip()
+    except sr.UnknownValueError:
+        return ""
+    except Exception as e:
+        log.warning("Google STT xato: %s", str(e)[:150])
+        return ""
+
+
+async def _google_job(src: Path, lang: str) -> str:
+    wav = tmp(".wav", "stt")
+    try:
+        if not await ffmpeg("-i", str(src), "-ac", "1", "-ar", "16000", str(wav), timeout=60):
+            return ""
+        return await asyncio.to_thread(_google_stt, wav, lang)
+    finally:
+        wav.unlink(missing_ok=True)
+
+
+def _clean(text: str) -> str:
+    return text.strip(" .,!?;:…\"'«»-\n")
+
+
+async def transcribe_all(src: Path, lang: str) -> list[str]:
+    """Bir nechta usul bilan matnga o'giradi (Groq Whisper + Google). Bir-biriga yaqin variantlar qidiruvda birlashadi."""
+    tasks = []
+    if config.GROQ_API_KEY:
+        tasks.append(_groq(src, lang))
+    tasks.append(_google_job(src, lang))
+    res = await asyncio.gather(*tasks, return_exceptions=True)
+    out: list[str] = []
+    for r in res:
+        if isinstance(r, Exception):
+            log.warning("STT istisno: %s", str(r)[:150])
+            continue
+        c = _clean(r)
+        if len(c) >= 2 and c.lower() not in [x.lower() for x in out]:
+            out.append(c)
+    return out
+
+
+async def make_gif(src: Path) -> Path | None:
+    """Videoning boshidan 6 soniya, ovozsiz (Telegram animatsiyasi)."""
+    out = tmp(".mp4", "gif")
+    ok = await ffmpeg("-i", str(src), "-t", "6", "-an", "-vf", "scale='min(480,iw)':-2,fps=20",
+                      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
+                      "-movflags", "+faststart", str(out))
+    return out if ok and out.exists() else None
+
+
+async def make_cover(src: Path) -> Path | None:
+    out = tmp(".jpg", "cover")
+    for ss in ("1", "0"):
+        if await ffmpeg("-ss", ss, "-i", str(src), "-frames:v", "1", "-q:v", "2", str(out)) and out.exists():
+            return out
+    return None
+
+
+async def apply_fx(src: Path, af: str) -> Path | None:
+    out = tmp(".mp3", "fx")
+    ok = await ffmpeg("-i", str(src), "-vn", "-af", af, "-c:a", "libmp3lame", "-b:a", "192k", str(out), timeout=240)
+    return out if ok and out.exists() else None
