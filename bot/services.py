@@ -286,8 +286,52 @@ def _ig_embed_urls(html_text: str) -> list[str]:
     return out[:10]
 
 
+def _ig_ytdlp_images(url: str) -> list[str]:
+    """yt-dlp post ma'lumotini oladi; rasmli elementlarning havolasi 'thumbnail' ichida bo'ladi."""
+    opts = _base(cookies=False) | {"skip_download": True, "ignore_no_formats_error": True, "noplaylist": False}
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    items = (info or {}).get("entries") or [info]
+    urls: list[str] = []
+    for e in items:
+        if not e or e.get("formats"):   # videoli element: rasm emas
+            continue
+        u = e.get("thumbnail")
+        if not u:
+            th = e.get("thumbnails") or []
+            u = th[-1].get("url") if th else None
+        if u and u.startswith("http") and u not in urls:
+            urls.append(u)
+    return urls[:10]
+
+
+def _ig_save(urls: list[str], proxy: str | None = None) -> Result | None:
+    files = []
+    for i, u in enumerate(urls):
+        try:
+            data = _http_get(u, proxy)
+        except Exception as e:
+            log.info("Instagram rasm yuklanmadi: %s", str(e)[:100])
+            continue
+        if len(data) < 2000:
+            continue
+        f = config.TMP_DIR / f"igp_{uuid.uuid4().hex[:6]}_{i}.jpg"
+        f.write_bytes(data)
+        files.append(f)
+    return Result(files, "") if files else None
+
+
 def _ig_photos(url: str) -> Result | None:
-    """yt-dlp rasmli postni (video yo'q) yuklay olmasa: embed sahifasidan rasmlarni olamiz. Sinalmagan zaxira yo'l."""
+    """Rasmli post: 1) yt-dlp ma'lumotidan, 2) embed sahifasidan."""
+    config.TMP_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        urls = _ig_ytdlp_images(url)
+        log.info("Instagram rasm (yt-dlp): %d ta havola", len(urls))
+        res = _ig_save(urls) if urls else None
+        if res:
+            return res
+    except Exception as e:
+        log.info("Instagram rasm (yt-dlp) xato: %s", str(e)[:150])
     m = _IG_CODE.search(url)
     if not m:
         return None
@@ -296,18 +340,12 @@ def _ig_photos(url: str) -> Result | None:
         try:
             page = _http_get(f"https://www.instagram.com/p/{code}/embed/captioned/", proxy).decode("utf-8", "ignore")
             urls = _ig_embed_urls(page)
-            if not urls:
-                continue
-            files = []
-            for i, u in enumerate(urls):
-                data = _http_get(u, proxy)
-                if len(data) < 2000:
-                    continue
-                f = config.TMP_DIR / f"igp_{uuid.uuid4().hex[:6]}_{i}.jpg"
-                f.write_bytes(data)
-                files.append(f)
-            if files:
-                return Result(files, "")
+            log.info("Instagram embed (proksi=%s): %d bayt, display_url=%s, img=%s, havola=%d, boshi=%r",
+                     bool(proxy), len(page), "display_url" in page, "EmbeddedMediaImage" in page,
+                     len(urls), page[:80])
+            res = _ig_save(urls, proxy) if urls else None
+            if res:
+                return res
         except Exception as e:
             log.info("Instagram embed o'tmadi (proksi=%s): %s", bool(proxy), str(e)[:120])
     return None
