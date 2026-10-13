@@ -35,3 +35,6 @@ RESOLVE_JOBS = int(os.getenv("RESOLVE_JOBS", "16"))
 UZ_BIAS = os.getenv("UZ_BIAS", "1") == "1"   # o'zbek tilidagi foydalanuvchiga o'zbekcha qo'shiqlar birinchi chiqadi
 PREFETCH = int(os.getenv("PREFETCH", "2"))   # qidiruvdan keyin nechta qo'shiq fonda oldindan yuklanadi (0 = o'chirilgan)
 SEARCH_HEDGE = float(os.getenv("SEARCH_HEDGE", "3"))   # birinchi qidiruv shuncha soniyada javob bermasa, zaxira parallel ishga tushadi
+
+PREFETCH = int(os.getenv("PREFETCH", "2"))
+SEARCH_HEDGE = float(os.getenv("SEARCH_HEDGE", "3"))
