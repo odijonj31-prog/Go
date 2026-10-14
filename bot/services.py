@@ -78,11 +78,10 @@ async def make_circle(src: Path) -> Path | None:
     out = tmp(".mp4", "circle")
     ok = await ffmpeg(
         "-i", str(src), "-t", "60",
-        "-vf", "crop='min(iw,ih)':'min(iw,ih)',scale=640:640,setsar=1",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(out))
+        "-vf", "crop='min(iw,ih)':'min(iw,ih)',scale=480:480,setsar=1",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-maxrate", "900k", "-bufsize", "1800k",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "64k", "-movflags", "+faststart", str(out))
     return out if ok and out.exists() else None
-
 
 async def to_mp3(src: Path) -> Path | None:
     out = tmp(".mp3", "audio")
@@ -199,7 +198,7 @@ def _with_clients(target: str, fn):
             if "sign in" not in msg and "bot" not in msg and "not available" not in msg:
                 raise
             log.info("YouTube klient %s o'tmadi", YT_CLIENTS[idx])
-    wait = 600 if yt_auth() else 3600   # cookies/proksi bo'lmasa, tez-tez urinish foydasiz: har urinish foydalanuvchini ~6 s kutdiradi
+       wait = 600 if yt_auth() else 6 * 3600    # cookies/proksi bo'lmasa, tez-tez urinish foydasiz: har urinish foydalanuvchini ~6 s kutdiradi
     _yt_block_until[0] = time.monotonic() + wait
     log.warning("YouTube bloklangan: %d daqiqa SoundCloud'ga o'tildi (cookies/proksi: %s)", wait // 60, yt_auth())
     raise last
