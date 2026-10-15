@@ -399,7 +399,7 @@ def _download(url: str, height: int = 720, max_items: int = 10) -> Result:
             except Exception as e:
                 err = err or e
         raise err or DownloadError("Instagram vaqtincha cheklangan (login talab qilinadi)")
-    return _with_clients(url, lambda cl: _download_once(url, height, cl, max_items, True))1
+    return _with_clients(url, lambda cl: _download_once(url, height, cl, max_items, True))
 
 
 def _download(url: str, height: int = 720, max_items: int = 10) -> Result:
