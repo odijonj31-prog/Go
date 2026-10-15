@@ -297,6 +297,25 @@ def _ig_embed_urls(html_text: str, key: str = "display_url") -> list[str]:
     return out[:10]
 
 
+def _ig_generic(page: str) -> tuple[list[str], list[str]]:
+    """Sahifadagi barcha CDN havolalarini topadi (format o'zgargan bo'lsa ham): (videolar, rasmlar)."""
+    txt = page.replace("\\\\/", "/").replace("\\/", "/").replace("\\\\u0026", "&").replace("\\u0026", "&")
+    txt = _html.unescape(txt)
+    stop = r'[^"\'\s<>\\]'
+    vids = re.findall(r'https://%s+?\.mp4%s*' % (stop, stop), txt)
+    imgs = [u for u in re.findall(r'https://%s*cdninstagram\.com%s*?\.jpg%s*' % (stop, stop, stop), txt)
+            if "t51.2885-19" not in u and "s150x150" not in u and "s320x320" not in u]
+    def dedupe(lst):
+        out, seen = [], set()
+        for u in lst:
+            k = u.split("?")[0]
+            if k not in seen:
+                seen.add(k)
+                out.append(u)
+        return out[:10]
+    return dedupe(vids), dedupe(imgs)
+
+
 def _ig_ytdlp_images(url: str) -> list[str]:
     """yt-dlp post ma'lumotini oladi; rasmli elementlarning havolasi 'thumbnail' ichida bo'ladi."""
     opts = _base(cookies=False) | {"skip_download": True, "ignore_no_formats_error": True, "noplaylist": False}
@@ -356,6 +375,15 @@ def _ig_photos(url: str) -> Result | None:
             imgs = _ig_embed_urls(page)
             log.info("Instagram embed (proksi=%s): %d bayt, video=%d, rasm=%d, login=%s",
                      bool(proxy), len(page), len(vids), len(imgs), "login" in page[:3000].lower())
+            if not vids and not imgs:
+                gv, gi = _ig_generic(page)
+                vids, imgs = gv, gi
+                i = page.find(".mp4")
+                log.info("Instagram embed tahlil: mp4=%d video_url=%d display_url=%d contextJSON=%d shortcode_media=%d cdn=%d umumiy_video=%d umumiy_rasm=%d boshi=%r mp4_atrofi=%r",
+                         page.count(".mp4"), page.count("video_url"), page.count("display_url"),
+                         page.count("contextJSON"), page.count("shortcode_media"), page.count("cdninstagram"),
+                         len(gv), len(gi), re.sub(r"\s+", " ", page[:150]),
+                         re.sub(r"\s+", " ", page[max(0, i - 60):i + 60]) if i >= 0 else "")
             res = None
             if vids:
                 res = _ig_save(vids, proxy, ".mp4", config.MAX_UPLOAD + 1, 20_000)
