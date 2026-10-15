@@ -198,11 +198,10 @@ def _with_clients(target: str, fn):
             if "sign in" not in msg and "bot" not in msg and "not available" not in msg:
                 raise
             log.info("YouTube klient %s o'tmadi", YT_CLIENTS[idx])
-           wait = 600 if yt_auth() else 6 * 3600
+    wait = 600 if yt_auth() else 6 * 3600
     _yt_block_until[0] = time.monotonic() + wait
     log.warning("YouTube bloklangan: %d daqiqa SoundCloud'ga o'tildi (cookies/proksi: %s)", wait // 60, yt_auth())
     raise last
-
 
 def video_format(h: int) -> str:
     return (f"bv*[height<={h}][vcodec^=avc]+ba[acodec^=mp4a]"
