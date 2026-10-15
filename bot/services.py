@@ -251,36 +251,47 @@ def _download_once(url: str, height: int, clients, max_items: int = 10, cookies:
     return Result(found, (info or {}).get("title") or "")
 
 
-# ---------------- Instagram rasmli postlar: embed sahifasidan ----------------
+# ---------------- Instagram: zaxira yo'llar (embed sahifasi, rasmli postlar) ----------------
 _IG_CODE = re.compile(r"instagram\.com/(?:[\w.]+/)?(?:p|reel|reels|tv)/([\w-]+)", re.I)
+_ig_cool = [0.0]   # Instagram anonim so'rovni cheklasa, shu vaqtgacha yt-dlp bilan urinmaymiz
 
 
-def _http_get(url: str, proxy: str | None = None, timeout: int = 15) -> bytes:
+def ig_cooling() -> bool:
+    return time.monotonic() < _ig_cool[0]
+
+
+def _ig_limited(err) -> bool:
+    m = str(err).lower()
+    return "login page" in m or "rate-limit" in m or "rate limit" in m
+
+
+def _http_get(url: str, proxy: str | None = None, timeout: int = 15, limit: int = 3_000_000) -> bytes:
     import urllib.request
     handlers = [urllib.request.ProxyHandler({"http": proxy, "https": proxy})] if proxy else []
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9"})
     with urllib.request.build_opener(*handlers).open(req, timeout=timeout) as r:
-        return r.read(3_000_000)
+        return r.read(limit)
 
 
-def _ig_embed_urls(html_text: str) -> list[str]:
-    """Embed sahifasidagi rasm havolalari (JSON ichida ham, <img> ichida ham)."""
+def _ig_embed_urls(html_text: str, key: str = "display_url") -> list[str]:
+    """Embed sahifasidagi havolalar: key='display_url' (rasm) yoki 'video_url' (video)."""
     found: list[str] = []
-    for m in re.finditer(r'\\?"display_url\\?"\s*:\s*\\?"(.+?)\\?"\s*[,}]', html_text):
+    for m in re.finditer(r'\\?"%s\\?"\s*:\s*\\?"(.+?)\\?"\s*[,}]' % key, html_text):
         found.append(m.group(1))
-    for m in re.finditer(r'class="[^"]*EmbeddedMediaImage[^"]*"[^>]*?src="([^"]+)"', html_text):
-        found.append(m.group(1))
+    if key == "display_url":
+        for m in re.finditer(r'class="[^"]*EmbeddedMediaImage[^"]*"[^>]*?src="([^"]+)"', html_text):
+            found.append(m.group(1))
     out, seen = [], set()
     for u in found:
         u = u.replace("\\\\u0026", "&").replace("\\u0026", "&").replace("\\\\/", "/").replace("\\/", "/")
         u = _html.unescape(u)
         if not u.startswith("http"):
             continue
-        key = u.split("?")[0]
-        if key not in seen:
-            seen.add(key)
+        k = u.split("?")[0]
+        if k not in seen:
+            seen.add(k)
             out.append(u)
     return out[:10]
 
@@ -304,33 +315,35 @@ def _ig_ytdlp_images(url: str) -> list[str]:
     return urls[:10]
 
 
-def _ig_save(urls: list[str], proxy: str | None = None) -> Result | None:
+def _ig_save(urls: list[str], proxy: str | None = None, ext: str = ".jpg",
+             limit: int = 3_000_000, min_size: int = 2000) -> Result | None:
     files = []
     for i, u in enumerate(urls):
         try:
-            data = _http_get(u, proxy)
+            data = _http_get(u, proxy, 30, limit)
         except Exception as e:
-            log.info("Instagram rasm yuklanmadi: %s", str(e)[:100])
+            log.info("Instagram fayl yuklanmadi: %s", str(e)[:100])
             continue
-        if len(data) < 2000:
+        if len(data) < min_size or len(data) >= limit:
             continue
-        f = config.TMP_DIR / f"igp_{uuid.uuid4().hex[:6]}_{i}.jpg"
+        f = config.TMP_DIR / f"igp_{uuid.uuid4().hex[:6]}_{i}{ext}"
         f.write_bytes(data)
         files.append(f)
     return Result(files, "") if files else None
 
 
 def _ig_photos(url: str) -> Result | None:
-    """Rasmli post: 1) yt-dlp ma'lumotidan, 2) embed sahifasidan."""
+    """yt-dlp o'tmasa zaxira: 1) rasmli post (yt-dlp ma'lumotidan), 2) embed sahifasidan video yoki rasm."""
     config.TMP_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        urls = _ig_ytdlp_images(url)
-        log.info("Instagram rasm (yt-dlp): %d ta havola", len(urls))
-        res = _ig_save(urls) if urls else None
-        if res:
-            return res
-    except Exception as e:
-        log.info("Instagram rasm (yt-dlp) xato: %s", str(e)[:150])
+    if not ig_cooling():
+        try:
+            urls = _ig_ytdlp_images(url)
+            log.info("Instagram rasm (yt-dlp): %d ta havola", len(urls))
+            res = _ig_save(urls) if urls else None
+            if res:
+                return res
+        except Exception as e:
+            log.info("Instagram rasm (yt-dlp) xato: %s", str(e)[:150])
     m = _IG_CODE.search(url)
     if not m:
         return None
@@ -338,16 +351,56 @@ def _ig_photos(url: str) -> Result | None:
     for proxy in ([None, config.PROXY_URL] if config.PROXY_URL else [None]):
         try:
             page = _http_get(f"https://www.instagram.com/p/{code}/embed/captioned/", proxy).decode("utf-8", "ignore")
-            urls = _ig_embed_urls(page)
-            log.info("Instagram embed (proksi=%s): %d bayt, display_url=%s, img=%s, havola=%d, boshi=%r",
-                     bool(proxy), len(page), "display_url" in page, "EmbeddedMediaImage" in page,
-                     len(urls), page[:80])
-            res = _ig_save(urls, proxy) if urls else None
+            vids = _ig_embed_urls(page, "video_url")
+            imgs = _ig_embed_urls(page)
+            log.info("Instagram embed (proksi=%s): %d bayt, video=%d, rasm=%d, login=%s",
+                     bool(proxy), len(page), len(vids), len(imgs), "login" in page[:3000].lower())
+            res = None
+            if vids:
+                res = _ig_save(vids, proxy, ".mp4", config.MAX_UPLOAD + 1, 20_000)
+            if not res and imgs:
+                res = _ig_save(imgs, proxy)
             if res:
                 return res
         except Exception as e:
             log.info("Instagram embed o'tmadi (proksi=%s): %s", bool(proxy), str(e)[:120])
     return None
+
+
+def _download(url: str, height: int = 720, max_items: int = 10) -> Result:
+    if _ig_public(url):
+        err = None
+        if not ig_cooling():
+            try:   # 1) cookies'siz, proksisiz (tez va ishonchli)
+                return _with_clients(url, lambda cl: _download_once(url, height, cl, max_items, False, False))
+            except Skipped:
+                raise
+            except Exception as e:
+                err = e
+                log.info("Instagram cookies'siz o'tmadi: %s", str(e)[:120])
+                if _ig_limited(e):   # Instagram bu IP'ni vaqtincha cheklagan: 10 daqiqa bekorga so'ramaymiz
+                    _ig_cool[0] = time.monotonic() + 600
+                    log.warning("Instagram anonim so'rovni cheklagan: 10 daqiqa yt-dlp o'tkazib yuboriladi")
+        if config.PROXY_URL:   # 2) proksi orqali
+            try:
+                return _with_clients(url, lambda cl: _download_once(url, height, cl, max_items, False, True))
+            except Skipped:
+                raise
+            except Exception as e:
+                err = e
+                log.info("Instagram proksi bilan o'tmadi: %s", str(e)[:120])
+        s = str(err or "")
+        if err is None or _ig_limited(err) or "No video formats" in s or "empty media" in s:   # 3) zaxira
+            res = _ig_photos(url)
+            if res:
+                return res
+        if config.COOKIES_FILE and Path(config.COOKIES_FILE).exists():   # 4) cookies bilan
+            try:
+                return _with_clients(url, lambda cl: _download_once(url, height, cl, max_items, True, False))
+            except Exception as e:
+                err = err or e
+        raise err or DownloadError("Instagram vaqtincha cheklangan (login talab qilinadi)")
+    return _with_clients(url, lambda cl: _download_once(url, height, cl, max_items, True))1
 
 
 def _download(url: str, height: int = 720, max_items: int = 10) -> Result:
@@ -387,6 +440,8 @@ async def download(url: str, height: int = 720, max_items: int = 10) -> Result:
 # ---------------- tezkor yo'l: to'g'ridan-to'g'ri havola ----------------
 def _resolve(url: str) -> dict | None:
     """Faylni yuklamasdan, Telegram o'zi olishi mumkin bo'lgan havolani topadi."""
+    if _ig_public(url) and ig_cooling():
+        return None
     opts = _base(cookies=not _ig_public(url), proxy=needs_proxy(url)) | {"format": "b[ext=mp4][height<=720]/b[height<=720]/b", "skip_download": True}
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -403,7 +458,6 @@ def _resolve(url: str) -> dict | None:
         return None
     ext = (info.get("ext") or "").lower()
     return {"url": link, "kind": "photo" if ext in IMG_EXT else "video", "title": info.get("title") or ""}
-
 
 async def resolve(url: str) -> dict | None:
     async with RSEM:
