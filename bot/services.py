@@ -83,6 +83,7 @@ async def make_circle(src: Path) -> Path | None:
         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "64k", "-movflags", "+faststart", str(out))
     return out if ok and out.exists() else None
 
+
 async def to_mp3(src: Path) -> Path | None:
     out = tmp(".mp3", "audio")
     ok = await ffmpeg("-i", str(src), "-vn", "-c:a", "libmp3lame", "-b:a", "192k", str(out))
@@ -198,10 +199,11 @@ def _with_clients(target: str, fn):
             if "sign in" not in msg and "bot" not in msg and "not available" not in msg:
                 raise
             log.info("YouTube klient %s o'tmadi", YT_CLIENTS[idx])
-    wait = 600 if yt_auth() else 6 * 3600
+    wait = 600 if yt_auth() else 6 * 3600   # cookies/proksi bo'lmasa, tez-tez urinish foydasiz: har urinish foydalanuvchini ~6 s kutdiradi
     _yt_block_until[0] = time.monotonic() + wait
     log.warning("YouTube bloklangan: %d daqiqa SoundCloud'ga o'tildi (cookies/proksi: %s)", wait // 60, yt_auth())
     raise last
+
 
 def video_format(h: int) -> str:
     return (f"bv*[height<={h}][vcodec^=avc]+ba[acodec^=mp4a]"
@@ -402,35 +404,6 @@ def _download(url: str, height: int = 720, max_items: int = 10) -> Result:
     return _with_clients(url, lambda cl: _download_once(url, height, cl, max_items, True))
 
 
-def _download(url: str, height: int = 720, max_items: int = 10) -> Result:
-    if _ig_public(url):
-        err = None
-        try:   # 1) cookies'siz, proksisiz (tez va ishonchli)
-            return _with_clients(url, lambda cl: _download_once(url, height, cl, max_items, False, False))
-        except Skipped:
-            raise
-        except Exception as e:
-            err = e
-            log.info("Instagram cookies'siz o'tmadi: %s", str(e)[:120])
-        if config.PROXY_URL:   # 2) Instagram datacenter IP'ni bloklasa: proksi orqali
-            try:
-                return _with_clients(url, lambda cl: _download_once(url, height, cl, max_items, False, True))
-            except Skipped:
-                raise
-            except Exception as e:
-                err = e
-                log.info("Instagram proksi bilan o'tmadi: %s", str(e)[:120])
-        if "No video formats" in str(err) or "empty media" in str(err):   # 3) rasmli post
-            res = _ig_photos(url)
-            if res:
-                return res
-        try:   # 4) oxirgi urinish: cookies bilan
-            return _with_clients(url, lambda cl: _download_once(url, height, cl, max_items, True, False))
-        except Exception:
-            raise err
-    return _with_clients(url, lambda cl: _download_once(url, height, cl, max_items, True))
-
-
 async def download(url: str, height: int = 720, max_items: int = 10) -> Result:
     async with JOBS:
         return await asyncio.to_thread(_download, url, height, max_items)
@@ -457,6 +430,7 @@ def _resolve(url: str) -> dict | None:
         return None
     ext = (info.get("ext") or "").lower()
     return {"url": link, "kind": "photo" if ext in IMG_EXT else "video", "title": info.get("title") or ""}
+
 
 async def resolve(url: str) -> dict | None:
     async with RSEM:
@@ -610,6 +584,7 @@ def _search_flat(prefix: str, q: str, n: int) -> list[dict]:
 
 _SC: dict[str, tuple[float, list]] = {}
 
+
 async def _one(prefix: str, q: str, n: int) -> list[dict]:
     async with SSEM:
         t0 = time.monotonic()
@@ -718,6 +693,7 @@ async def search_multi(queries: list[str], lang: str, limit: int = 20) -> list[d
     seen = {x["target"] for x in out}
     out += [x for x in _merge(rest, limit) if x["target"] not in seen]
     return out[:limit]
+
 
 # ---------------- ovozni matnga o'girish ----------------
 STT_PROMPT = {

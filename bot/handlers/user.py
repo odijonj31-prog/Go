@@ -750,8 +750,10 @@ async def send_song(msg: Message, lang: str, uid: int, target: str, cache_key: s
     try:
         if song.path.stat().st_size > config.MAX_UPLOAD:
             return await (status.edit_text(t(lang, "too_big")) if status else msg.answer(t(lang, "too_big")))
+        t_up = time.monotonic()
         sent = await msg.answer_audio(FSInputFile(song.path, chunk_size=512 * 1024),
                                       title=song.title[:60], performer=song.artist[:60], caption=cap, reply_markup=kb)
+        log.info("TIMING telegramga yuborish %.1fs (%d KB)", time.monotonic() - t_up, song.path.stat().st_size // 1024)
         await db.cache_put(cache_key, [["audio", sent.audio.file_id]], song.title)
         await db.incr("download")
         await db.bump_downloads(uid)
@@ -859,7 +861,9 @@ async def show_search(msg: Message, q: str, lang: str, extra: list[str] | None =
         return await msg.answer(t(lang, "short_q"))
     status = await msg.answer("🎤 ..." if hide_q else t(lang, "search_wait", q=esc(q)))
     queries = [q] + [x[:100] for x in (extra or []) if x.strip().lower() != q.lower()]
+    t_s = time.monotonic()
     results = await services.search_multi(queries, lang)
+    log.info("TIMING qidiruv jami %.1fs natija=%d", time.monotonic() - t_s, len(results))
     if not results:
         return await status.edit_text(t(lang, "search_none"))
     await db.incr("search")
